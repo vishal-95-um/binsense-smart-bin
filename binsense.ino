@@ -1,5 +1,7 @@
+#include <Wire.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <Adafruit_VL53L0X.h>
 #include <math.h>
 
 // WiFi Credentials
@@ -15,13 +17,12 @@
 #define BIN_LOCATION "near snacker"   // <-- Added location here
 
 // Sensor Pins
-#define TRIG_PIN_1 5
-#define ECHO_PIN_1 18
-#define TRIG_PIN_2 19
-#define ECHO_PIN_2 21
+#define X_Shut1 25
+#define X_Shut2 26
 #define MQ135_PIN 34  // Analog pin for MQ135 (ADC1 channel only)
 
 // Constants
+#define SENSOR_HEIGHT 76.0 //Distance of VL53L0X from Bin Bottom
 #define BIN_HEIGHT 37.0   // Bin height in cm
 #define RL 10000.0        // Load resistance of MQ135 (in ohms)
 #define RO 9252.40        // Your calibrated Ro from clean air
@@ -45,29 +46,52 @@
 #define PARA_ALCOHOL 4.8387
 #define PARB_ALCOHOL -1.4974
 
-float getDistance(int trigPin, int echoPin) {
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
+Adafruit_VL53L0X lox1 = Adafruit_VL53L0X();
+Adafruit_VL53L0X lox2 = Adafruit_VL53L0X();
 
-  long duration = pulseIn(echoPin, HIGH, BIN_HEIGHT * 58 + 2000); // Timeout slightly above max height
-
-  if (duration == 0) {
-    return -1.0;  // Invalid reading (no echo)
+void initVL53L0X() {
+  pinMode(X_Shut1, OUTPUT);
+  pinMode(X_Shut2, OUTPUT);
+  
+  // Turn both off at first
+  digitalWrite(X_Shut1, LOW);
+  digitalWrite(X_Shut2, LOW);
+  
+  // Assign Address to first by turning it on
+  digitalWrite(X_Shut1, HIGH);
+  delay(10);
+  if(!lox1.begin(0x30)) {
+    Serial.println("Failed to start VL53LOX #1");
+    while(1);
   }
+  
+    // Assign Address to second by turning it on
+  digitalWrite(X_Shut2, HIGH);
+  delay(10);
+  if(!lox2.begin(0x31)) {
+    Serial.println("Failed to start VL53LOX #2");
+    while(1);
+  }
+  Serial.println("Both VL53L0X sensors initialized successfully!!");
+}
 
-  float distance = duration * 0.034 / 2;
-  return (distance > BIN_HEIGHT) ? BIN_HEIGHT : distance;
+float getDistance(Adafruit_VL53L0X &sensor) {
+ VL53L0X_RangingMeasurementData_t measure;
+  sensor.rangingTest(&measure, false);
+  if (measure.RangeStatus != 4) {
+    return measure.RangeMilliMeter / 10.0; // mm → cm
+  } else {
+    return -1.0; // invalid
+  }
 }
 
 float getFillLevel(float d1, float d2) {
-  if (d1 < 0 || d2 < 0) return 0.0; // Handle invalid readings
+  if (d1 < 0 || d2 < 0) return 0.0;
   float avg = (d1 + d2) / 2.0;
-  float fill = ((BIN_HEIGHT - avg) / BIN_HEIGHT) * 100;
+  float fill = ((SENSOR_HEIGHT - avg) / BIN_HEIGHT) * 100.0;
   return constrain(fill, 0.0, 100.0);
 }
+
 
 float getResistance() {
   int adcValue = analogRead(MQ135_PIN);
@@ -138,10 +162,6 @@ void sendDataToFirebase(float sensor1, float sensor2, float fillLevel,
 
 void setup() {
   Serial.begin(115200);
-  pinMode(TRIG_PIN_1, OUTPUT);
-  pinMode(ECHO_PIN_1, INPUT);
-  pinMode(TRIG_PIN_2, OUTPUT);
-  pinMode(ECHO_PIN_2, INPUT);
   pinMode(MQ135_PIN, INPUT);
 
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -151,11 +171,12 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nWiFi Connected!");
+  initVL53L0X();
 }
 
 void loop() {
-  float d1 = getDistance(TRIG_PIN_1, ECHO_PIN_1);
-  float d2 = getDistance(TRIG_PIN_2, ECHO_PIN_2);
+  float d1 = getDistance(lox1);
+  float d2 = getDistance(lox2);
   float fill = getFillLevel(d1, d2);
 
   float co2, nh3, co, alcohol;
